@@ -5,190 +5,188 @@ import random
 import struct
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
-
 import zstandard as zstd
 
 URL = "https://database.lichess.org/lichess_db_puzzle.csv.zst"
-OUT_FILE = Path("puzzles.bin")
-TEMP_FILE = Path("puzzles.bin.tmp")
+OUT_DIR = Path("puzzles")
+ZIP_FILE = Path("puzzles.zip")
 
-# Keep this binary layout compatible with the existing reader:
-# uint32 puzzle count
-# repeated: uint16 rating, uint8 theme ID, uint8 FEN byte length,
-#           FEN bytes, uint8 moves byte length, moves bytes.
-THEMES_MAP = {
-    "mateIn1": 1, "mateIn2": 2, "mateIn3": 3, "mateIn4": 4, "mate": 5,
-    "fork": 6, "pin": 7, "skewer": 8, "discoveredAttack": 9, "sacrifice": 10,
-    "deflection": 11, "attraction": 12, "clearance": 13, "interference": 14,
-    "xRayAttack": 15, "backRankMate": 16, "smotheredMate": 17, "anastasiaMate": 18,
-    "arabianMate": 19, "hookMate": 20, "pawnEndgame": 21, "rookEndgame": 22,
-    "queenEndgame": 23, "knightEndgame": 24, "bishopEndgame": 25, "endgame": 26,
-    "opening": 27, "middlegame": 28, "zugzwang": 29, "quietMove": 30,
-}
+# PRIORITY HIERARCHY: Rarest & most specific tactics are captured first.
+THEME_PRIORITY = [
+    "enPassant", "castling", "smotheredMate", "bodenMate", "arabianMate", "anastasiaMate", "hookMate", 
+    "underPromotion", "doubleCheck", "zugzwang", "intermezzo", "interference", "xRayAttack", 
+    "clearance", "defensiveMove", "quietMove", "attraction", "deflection", 
+    "sacrifice", "discoveredAttack", "trappedPiece", "skewer", "pin", "fork", "hangingPiece", "exposedKing",
+    "mateIn5", "mateIn4", "mateIn3", "mateIn2", "mateIn1", "mate",
+    "pawnEndgame", "rookEndgame", "knightEndgame", "bishopEndgame", "queenEndgame", "endgame",
+    "opening", "middlegame",
+    "advantage", "crushing", "short", "long", "master", "masterVsMaster", "superGM"
+]
 
-TARGET_TIER3 = 300_000  # shorter puzzles
-TARGET_TIER2 = 100_000  # medium puzzles
-TARGET_TIER1 = 10_000   # longer puzzles
+def get_best_theme(themes_str):
+    tags = themes_str.split()
+    for theme in THEME_PRIORITY:
+        if theme in tags:
+            return theme
+    return tags[0] if tags else "unclassified"
 
-
-def get_theme_id(themes_str):
-    """Return the first recognized theme ID, or 0 when none is recognized."""
-    for theme in themes_str.split():
-        if theme in THEMES_MAP:
-            return THEMES_MAP[theme]
-    return 0
-
-
-def parse_puzzle(row):
-    """Parse a Lichess CSV row; return None for invalid/unsupported rows."""
-    # Lichess columns: PuzzleId, FEN, Moves, Rating, RatingDeviation,
-    # Popularity, NbPlays, Themes, GameUrl, OpeningTags.
-    if len(row) < 8:
-        return None
-
-    try:
-        rating = int(row[3])
-        deviation = int(row[4])
-        plays = int(row[6])
-    except (ValueError, TypeError):
-        return None
-
-    if not (1000 <= rating <= 1800) or deviation > 80:
-        return None
-
-    fen = row[1].strip()
-    moves_str = row[2].strip()
-    if not fen or not moves_str:
-        return None
-
-    fen_bytes = fen.encode("utf-8")
-    moves_bytes = moves_str.encode("utf-8")
-
-    # The existing binary format stores each string length in one byte.
-    # Skip rows that cannot be represented safely rather than crashing.
-    if len(fen_bytes) > 255 or len(moves_bytes) > 255:
-        return None
-
-    plies = len(moves_str.split())
-    themes = row[7]
-    theme_id = get_theme_id(themes)
-    item = (rating, theme_id, fen, moves_str)
-
-    if plies < 8 and plays >= 200:
-        return 3, item
-    if 8 <= plies < 16 and plays >= 200:
-        return 2, item
-    if plies >= 16 and plays >= 50:
-        return 1, item
-    return None
-
-
-def write_binary(puzzles, destination):
-    """Write the established binary format to a temporary file."""
-    with destination.open("wb") as output:
+def write_binary(puzzles, filepath):
+    # Binary Structure (Theme ID Dropped):
+    # [Total Puzzles (uint32)]
+    # Loop: [Rating (uint16)] [FEN Length (uint8)] [FEN Bytes] [Moves Length (uint8)] [Moves Bytes]
+    with filepath.open("wb") as output:
         output.write(struct.pack("<I", len(puzzles)))
-        for rating, theme_id, fen, moves_str in puzzles:
+        for rating, fen, moves_str in puzzles:
             fen_bytes = fen.encode("utf-8")
             moves_bytes = moves_str.encode("utf-8")
-            output.write(struct.pack("<HB", rating, theme_id))
+            output.write(struct.pack("<H", rating))
             output.write(struct.pack("B", len(fen_bytes)))
             output.write(fen_bytes)
             output.write(struct.pack("B", len(moves_bytes)))
             output.write(moves_bytes)
 
-
 def main():
-    tier3_pool = []
-    tier2_pool = []
-    tier1_pool = []
-
     print("Downloading the official Lichess puzzle database...", flush=True)
-    request = urllib.request.Request(
-        URL,
-        headers={"User-Agent": "lichess-puzzle-extractor/2.0"},
-    )
+    request = urllib.request.Request(URL, headers={"User-Agent": "lichess-puzzle-extractor/3.0"})
 
+    grouped_puzzles = {1: {}, 2: {}, 3: {}}
+    
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             decompressor = zstd.ZstdDecompressor()
             with decompressor.stream_reader(response) as reader:
                 text_stream = io.TextIOWrapper(reader, encoding="utf-8", newline="")
                 rows = csv.reader(text_stream)
-
                 header = next(rows, None)
-                if not header or len(header) < 8:
-                    raise RuntimeError("Downloaded CSV has no valid Lichess puzzle header.")
 
-                print("Streaming and filtering puzzle rows...", flush=True)
+                print("Streaming and filtering puzzle rows into RAM...", flush=True)
                 scanned = 0
                 for row in rows:
                     scanned += 1
-                    parsed = parse_puzzle(row)
-                    if parsed is None:
+                    if len(row) < 8:
+                        continue
+                    
+                    try:
+                        rating = int(row[3])
+                        deviation = int(row[4])
+                        plays = int(row[6])
+                    except ValueError:
                         continue
 
-                    tier, item = parsed
-                    if tier == 3 and len(tier3_pool) < TARGET_TIER3:
-                        tier3_pool.append(item)
-                    elif tier == 2 and len(tier2_pool) < TARGET_TIER2:
-                        tier2_pool.append(item)
-                    elif tier == 1 and len(tier1_pool) < TARGET_TIER1:
-                        tier1_pool.append(item)
+                    # New 1300 to 2100 rating bracket
+                    if not (1300 <= rating <= 2100) or deviation > 80:
+                        continue
+                        
+                    fen = row[1].strip()
+                    moves_str = row[2].strip()
+                    if not fen or not moves_str:
+                        continue
+                        
+                    fen_bytes = fen.encode("utf-8")
+                    moves_bytes = moves_str.encode("utf-8")
+                    if len(fen_bytes) > 255 or len(moves_bytes) > 255:
+                        continue
+
+                    # A ply is a half-move. The first ply is the opponent's blunder.
+                    user_moves = len(moves_str.split()) // 2
+                    
+                    if user_moves <= 3:
+                        tier = 1
+                        min_plays = 200
+                    elif 4 <= user_moves <= 5:
+                        tier = 2
+                        min_plays = 200
+                    else:
+                        tier = 3
+                        min_plays = 50
+                        
+                    if plays < min_plays:
+                        continue
+                        
+                    theme = get_best_theme(row[7])
+                    
+                    if theme not in grouped_puzzles[tier]:
+                        grouped_puzzles[tier][theme] = []
+                    
+                    grouped_puzzles[tier][theme].append((rating, fen, moves_str))
 
                     if scanned % 1_000_000 == 0:
-                        print(
-                            f"Scanned {scanned:,} rows | "
-                            f"Tier 3: {len(tier3_pool):,} | "
-                            f"Tier 2: {len(tier2_pool):,} | "
-                            f"Tier 1: {len(tier1_pool):,}",
-                            flush=True,
-                        )
+                        t1_cnt = sum(len(v) for v in grouped_puzzles[1].values())
+                        t2_cnt = sum(len(v) for v in grouped_puzzles[2].values())
+                        t3_cnt = sum(len(v) for v in grouped_puzzles[3].values())
+                        print(f"Scanned {scanned:,} rows | Pool T1: {t1_cnt:,} | T2: {t2_cnt:,} | T3: {t3_cnt:,}", flush=True)
 
-                    if (
-                        len(tier3_pool) >= TARGET_TIER3
-                        and len(tier2_pool) >= TARGET_TIER2
-                        and len(tier1_pool) >= TARGET_TIER1
-                    ):
-                        break
-
-                # Flush TextIOWrapper before leaving the reader context.
                 text_stream.detach()
-
     except Exception as exc:
-        print(f"ERROR while downloading or processing the puzzle database: {exc}", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         raise
 
-    all_puzzles = tier3_pool + tier2_pool + tier1_pool
-    if not all_puzzles:
-        raise RuntimeError("No puzzles were collected; refusing to replace puzzles.bin.")
+    print("Running Waterfall Redistribution Loop...", flush=True)
+    # Waterfall distribution targets
+    targets = {1: 325000, 2: 65000, 3: 13000}
+    selected_puzzles = {}
 
-    random.shuffle(all_puzzles)
-    print(
-        f"Collected {len(all_puzzles):,} puzzles "
-        f"(Tier 3={len(tier3_pool):,}, Tier 2={len(tier2_pool):,}, "
-        f"Tier 1={len(tier1_pool):,}).",
-        flush=True,
-    )
+    for tier, target in targets.items():
+        pool = grouped_puzzles[tier]
+        for theme in pool:
+            random.shuffle(pool[theme])
+            if theme not in selected_puzzles:
+                selected_puzzles[theme] = []
 
-    try:
-        write_binary(all_puzzles, TEMP_FILE)
-        if TEMP_FILE.stat().st_size < 4:
-            raise RuntimeError("Generated binary file is unexpectedly small.")
+        active_themes = list(pool.keys())
+        remaining = target
 
-        # Validate the header count before replacing the last good file.
-        with TEMP_FILE.open("rb") as check:
-            stored_count = struct.unpack("<I", check.read(4))[0]
-        if stored_count != len(all_puzzles):
-            raise RuntimeError("Binary validation failed: puzzle count mismatch.")
+        while remaining > 0 and active_themes:
+            quota = remaining // len(active_themes)
 
-        os.replace(TEMP_FILE, OUT_FILE)
-    finally:
-        if TEMP_FILE.exists():
-            TEMP_FILE.unlink()
+            # If space is tiny, dish out 1 puzzle per theme until full
+            if quota == 0:
+                random.shuffle(active_themes)
+                for theme in active_themes[:remaining]:
+                    if pool[theme]:
+                        selected_puzzles[theme].append(pool[theme].pop())
+                break
 
-    print(f"SUCCESS: wrote {OUT_FILE} ({OUT_FILE.stat().st_size:,} bytes).", flush=True)
+            new_active = []
+            for theme in active_themes:
+                available = len(pool[theme])
+                take = min(quota, available)
+                selected_puzzles[theme].extend(pool[theme][:take])
+                pool[theme] = pool[theme][take:]
+                remaining -= take
+                
+                # If theme still has puzzles, keep it active for the next redistribution loop
+                if pool[theme]:
+                    new_active.append(theme)
+            active_themes = new_active
 
+    OUT_DIR.mkdir(exist_ok=True)
+    
+    total_saved = 0
+    for theme, puzzles in selected_puzzles.items():
+        if not puzzles:
+            continue
+        # Final massive shuffle so difficulty tiers are completely mixed within the .bin
+        random.shuffle(puzzles)
+        filepath = OUT_DIR / f"{theme}.bin"
+        write_binary(puzzles, filepath)
+        total_saved += len(puzzles)
+        
+    print(f"Successfully generated {len(selected_puzzles)} theme bins. Total puzzles: {total_saved:,}", flush=True)
+
+    print("Zipping up all bin files into puzzles.zip...", flush=True)
+    with zipfile.ZipFile(ZIP_FILE, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(OUT_DIR):
+            for file in files:
+                if file.endswith('.bin'):
+                    filepath = os.path.join(root, file)
+                    # Flattens the zip so all .bin files are right at the root
+                    zipf.write(filepath, file) 
+                
+    print(f"Done! {ZIP_FILE} created successfully.", flush=True)
 
 if __name__ == "__main__":
     main()
+                        

@@ -1,4 +1,4 @@
-name: Build Puzzles Bin V2
+name: Build Puzzles Bin V3
 
 on:
   workflow_dispatch:
@@ -6,9 +6,8 @@ on:
 permissions:
   contents: write
 
-# Prevent two manual runs from pushing to main at the same time.
 concurrency:
-  group: build-puzzles-bin-v2
+  group: build-puzzles-bin-v3
   cancel-in-progress: false
 
 jobs:
@@ -32,46 +31,42 @@ jobs:
       - name: Install dependency
         run: python -m pip install --upgrade pip zstandard
 
-      - name: Build puzzles.bin
-        run: python puzzle_builder_v2.py
+      - name: Build puzzle archives
+        run: python puzzle_builder_v3.py
 
       - name: Commit and push generated database
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -e
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add puzzles.bin
-
+          
+          # Only pushing the ZIP file to save raw repository bandwidth
+          git add puzzles.zip
+          
           if git diff --cached --quiet; then
-            echo "puzzles.bin has not changed; nothing to commit."
+            echo "puzzles.zip has not changed; nothing to commit."
             exit 0
           fi
-
-          git commit -m "Update generated puzzles.bin"
-
-          # Retry synchronization/push in case main changes while the job runs.
+          
+          git commit -m "Update generated puzzles.zip"
+          
           for attempt in 1 2 3; do
             echo "Push attempt ${attempt}/3"
             git fetch origin main
-
             if ! git rebase -X theirs origin/main; then
               git rebase --abort || true
               echo "Rebase failed; stopping rather than overwriting remote history."
               exit 1
             fi
-
             if git push origin HEAD:main; then
-              echo "Successfully pushed puzzles.bin to main."
+              echo "Successfully pushed puzzles.zip to main."
               exit 0
             fi
-
             echo "Push rejected; will fetch and retry."
             sleep 2
           done
-
           echo "Could not push after 3 attempts."
           exit 1
+          

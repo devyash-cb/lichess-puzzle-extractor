@@ -1,0 +1,23 @@
+name: Build Puzzles Bin
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install zstandard
+      - name: Run script
+        run: python puzzle_builder.py
+      - name: Commit and push
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add puzzles.bin
+          git commit -m "Auto-generate puzzles.bin" || exit 0
+          git push

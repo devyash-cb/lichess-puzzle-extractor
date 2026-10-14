@@ -1,46 +1,80 @@
-name: Generate Lichess Puzzle Database
+name: Build Puzzles Bin V3
 
 on:
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-puzzles-bin-v3
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      - name: Check out main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.12"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install zstandard
+      - name: Install dependency
+        run: python -m pip install --upgrade pip zstandard
 
-      - name: Download Lichess Puzzle Database (Streaming ZST)
-        run: |
-          wget -q https://database.lichess.org/lichess_db_puzzle.csv.zst -O lichess_db_puzzle.csv.zst
+      - name: Download Lichess Puzzle Database
+        run: wget -q https://database.lichess.org/lichess_db_puzzle.csv.zst -O lichess_db_puzzle.csv.zst
 
-      - name: Process Puzzles
-        run: |
-          python process_puzzles.py
+      - name: Build puzzle archives
+        run: python puzzle_builder_v3.py
 
-      - name: Package Binaries
+      - name: Package Binaries into ZIP
         run: |
-          # Compress the puzzle folders into your required zip format
           cd puzzlesbin
-          zip -r ../puzzle123.zip ./*
+          zip -r ../puzzles.zip ./*
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v3
-          name: "Puzzle Binaries v3"
-          files: puzzle123.zip
+      - name: Commit and push generated database
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # Only pushing the ZIP file to save raw repository bandwidth
+          git add puzzles.zip
+          
+          if git diff --cached --quiet; then
+            echo "puzzles.zip has not changed; nothing to commit."
+            exit 0
+          fi
+          
+          git commit -m "Update generated puzzles.zip"
+          
+          for attempt in 1 2 3; do
+            echo "Push attempt ${attempt}/3"
+            git fetch origin main
+            if ! git rebase -X theirs origin/main; then
+              git rebase --abort || true
+              echo "Rebase failed; stopping rather than overwriting remote history."
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              echo "Successfully pushed puzzles.zip to main."
+              exit 0
+            fi
+            echo "Push rejected; will fetch and retry."
+            sleep 2
+          done
+          echo "Could not push after 3 attempts."
+          exit 1
           

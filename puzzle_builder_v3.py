@@ -1,192 +1,183 @@
 import csv
+import struct
+import json
 import io
 import os
-import random
-import struct
-import sys
-import urllib.request
-import zipfile
-from pathlib import Path
 import zstandard as zstd
+from collections import defaultdict
 
-URL = "https://database.lichess.org/lichess_db_puzzle.csv.zst"
-OUT_DIR = Path("puzzles")
-ZIP_FILE = Path("puzzles.zip")
-
-# PRIORITY HIERARCHY: Rarest & most specific tactics are captured first.
-THEME_PRIORITY = [
-    "enPassant", "castling", "smotheredMate", "bodenMate", "arabianMate", "anastasiaMate", "hookMate", 
-    "underPromotion", "doubleCheck", "zugzwang", "intermezzo", "interference", "xRayAttack", 
-    "clearance", "defensiveMove", "quietMove", "attraction", "deflection", 
-    "sacrifice", "discoveredAttack", "trappedPiece", "skewer", "pin", "fork", "hangingPiece", "exposedKing",
-    "mateIn5", "mateIn4", "mateIn3", "mateIn2", "mateIn1", "mate",
-    "pawnEndgame", "rookEndgame", "knightEndgame", "bishopEndgame", "queenEndgame", "endgame",
-    "opening", "middlegame",
-    "advantage", "crushing", "short", "long", "master", "masterVsMaster", "superGM"
+# 39 Supported Themes
+THEMES = [
+    "arabianMate", "pin", "zugzwang", "knightEndgame", "rookEndgame", "endgame", "exposedKing", 
+    "discoveredAttack", "bodenMate", "intermezzo", "opening", "interference", "xRayAttack", 
+    "hookMate", "smotheredMate", "sacrifice", "clearance", "castling", "quietMove", "mateIn2", 
+    "middlegame", "skewer", "queenEndgame", "deflection", "doubleCheck", "defensiveMove", 
+    "hangingPiece", "enPassant", "trappedPiece", "bishopEndgame", "mateIn1", "anastasiaMate", 
+    "mateIn4", "mateIn3", "underPromotion", "fork", "attraction", "pawnEndgame", "mateIn5"
 ]
+THEME_MAP = {t: i for i, t in enumerate(THEMES)}
 
-def get_best_theme(themes_str):
-    tags = themes_str.split()
-    for theme in THEME_PRIORITY:
-        if theme in tags:
-            return theme
-    return tags[0] if tags else "unclassified"
+# Target limits per 100-rating bracket
+LIMITS = {1: 3000, 2: 1000, 3: 250}
 
-def write_binary(puzzles, filepath):
-    # Binary Structure (Theme ID Dropped):
-    # [Total Puzzles (uint32)]
-    # Loop: [Rating (uint16)] [FEN Length (uint8)] [FEN Bytes] [Moves Length (uint8)] [Moves Bytes]
-    with filepath.open("wb") as output:
-        output.write(struct.pack("<I", len(puzzles)))
-        for rating, fen, moves_str in puzzles:
-            fen_bytes = fen.encode("utf-8")
-            moves_bytes = moves_str.encode("utf-8")
-            output.write(struct.pack("<H", rating))
-            output.write(struct.pack("B", len(fen_bytes)))
-            output.write(fen_bytes)
-            output.write(struct.pack("B", len(moves_bytes)))
-            output.write(moves_bytes)
+# 1200-1299 Reserve limits
+RESERVE_LIMITS = {1: 9000, 2: 1000, 3: 100}
 
-def main():
-    print("Downloading the official Lichess puzzle database...", flush=True)
-    request = urllib.request.Request(URL, headers={"User-Agent": "lichess-puzzle-extractor/3.0"})
+def get_tier(moves_str):
+    ply = len(moves_str.strip().split(' '))
+    if ply <= 5: return 1
+    elif ply <= 9: return 2
+    else: return 3
 
-    grouped_puzzles = {1: {}, 2: {}, 3: {}}
+def pack_standard_puzzle(rating, fen, moves):
+    fen_b = fen.encode('utf-8')
+    mov_b = moves.encode('utf-8')
+    return struct.pack(f'<H B {len(fen_b)}s B {len(mov_b)}s', rating, len(fen_b), fen_b, len(mov_b), mov_b)
+
+def pack_reserve_puzzle(theme_id, rating, fen, moves):
+    fen_b = fen.encode('utf-8')
+    mov_b = moves.encode('utf-8')
+    return struct.pack(f'<B H B {len(fen_b)}s B {len(mov_b)}s', theme_id, rating, len(fen_b), fen_b, len(mov_b), mov_b)
+
+def process_lichess_database(zst_path):
+    # Data Stores
+    categorized = defaultdict(lambda: defaultdict(list)) # theme -> tier -> list
+    unclassified = defaultdict(list) # tier -> list
+    reserve = {1: [], 2: [], 3: []} # tier -> list
     
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            decompressor = zstd.ZstdDecompressor()
-            with decompressor.stream_reader(response) as reader:
-                text_stream = io.TextIOWrapper(reader, encoding="utf-8", newline="")
-                rows = csv.reader(text_stream)
-                header = next(rows, None)
-
-                print("Streaming and filtering puzzle rows into RAM...", flush=True)
-                scanned = 0
-                for row in rows:
-                    scanned += 1
-                    if len(row) < 8:
-                        continue
-                    
-                    try:
-                        rating = int(row[3])
-                        deviation = int(row[4])
-                        plays = int(row[6])
-                    except ValueError:
-                        continue
-
-                    # New 1300 to 2100 rating bracket
-                    if not (1300 <= rating <= 2100) or deviation > 80:
-                        continue
-                        
-                    fen = row[1].strip()
-                    moves_str = row[2].strip()
-                    if not fen or not moves_str:
-                        continue
-                        
-                    fen_bytes = fen.encode("utf-8")
-                    moves_bytes = moves_str.encode("utf-8")
-                    if len(fen_bytes) > 255 or len(moves_bytes) > 255:
-                        continue
-
-                    # A ply is a half-move. The first ply is the opponent's blunder.
-                    user_moves = len(moves_str.split()) // 2
-                    
-                    if user_moves <= 3:
-                        tier = 1
-                        min_plays = 200
-                    elif 4 <= user_moves <= 5:
-                        tier = 2
-                        min_plays = 200
-                    else:
-                        tier = 3
-                        min_plays = 50
-                        
-                    if plays < min_plays:
-                        continue
-                        
-                    theme = get_best_theme(row[7])
-                    
-                    if theme not in grouped_puzzles[tier]:
-                        grouped_puzzles[tier][theme] = []
-                    
-                    grouped_puzzles[tier][theme].append((rating, fen, moves_str))
-
-                    if scanned % 1_000_000 == 0:
-                        t1_cnt = sum(len(v) for v in grouped_puzzles[1].values())
-                        t2_cnt = sum(len(v) for v in grouped_puzzles[2].values())
-                        t3_cnt = sum(len(v) for v in grouped_puzzles[3].values())
-                        print(f"Scanned {scanned:,} rows | Pool T1: {t1_cnt:,} | T2: {t2_cnt:,} | T3: {t3_cnt:,}", flush=True)
-
-                text_stream.detach()
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        raise
-
-    print("Running Waterfall Redistribution Loop...", flush=True)
-    # Waterfall distribution targets
-    targets = {1: 325000, 2: 65000, 3: 13000}
-    selected_puzzles = {}
-
-    for tier, target in targets.items():
-        pool = grouped_puzzles[tier]
-        for theme in pool:
-            random.shuffle(pool[theme])
-            if theme not in selected_puzzles:
-                selected_puzzles[theme] = []
-
-        active_themes = list(pool.keys())
-        remaining = target
-
-        while remaining > 0 and active_themes:
-            quota = remaining // len(active_themes)
-
-            # If space is tiny, dish out 1 puzzle per theme until full
-            if quota == 0:
-                random.shuffle(active_themes)
-                for theme in active_themes[:remaining]:
-                    if pool[theme]:
-                        selected_puzzles[theme].append(pool[theme].pop())
-                break
-
-            new_active = []
-            for theme in active_themes:
-                available = len(pool[theme])
-                take = min(quota, available)
-                selected_puzzles[theme].extend(pool[theme][:take])
-                pool[theme] = pool[theme][take:]
-                remaining -= take
+    print("Streaming Lichess ZST...")
+    with open(zst_path, 'rb') as f:
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(f) as reader:
+            text_stream = io.TextIOWrapper(reader, encoding='utf-8')
+            csv_reader = csv.reader(text_stream)
+            next(csv_reader) # Skip Header
+            
+            for row in csv_reader:
+                # PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags
+                if len(row) < 8: continue
                 
-                # If theme still has puzzles, keep it active for the next redistribution loop
-                if pool[theme]:
-                    new_active.append(theme)
-            active_themes = new_active
+                fen, moves = row[1], row[2]
+                rating = int(row[3])
+                popularity = int(row[5])
+                plays = int(row[6])
+                puzzle_themes = row[7].split(' ')
+                
+                tier = get_tier(moves)
+                
+                # Identify first supported theme
+                primary_theme = next((t for t in puzzle_themes if t in THEME_MAP), None)
+                
+                # RESERVE Logic (1200-1299)
+                if 1200 <= rating < 1300 and primary_theme:
+                    if popularity >= 90 and plays >= 400:
+                        reserve[tier].append((rating, fen, moves, primary_theme))
+                    continue
+                
+                if rating < 1300:
+                    continue
+                
+                # MAIN Logic (1300+)
+                if primary_theme:
+                    categorized[primary_theme][tier].append((rating, fen, moves))
+                else:
+                    unclassified[tier].append((rating, fen, moves))
 
-    OUT_DIR.mkdir(exist_ok=True)
+    # Compile and Build Binaries
+    print("Writing Binaries and Meta JSON...")
+    os.makedirs('puzzlesbin/unclassified', exist_ok=True)
+    os.makedirs('puzzlesbin/reserve', exist_ok=True)
     
+    meta_json = {}
     total_saved = 0
-    for theme, puzzles in selected_puzzles.items():
-        if not puzzles:
-            continue
-        # Final massive shuffle so difficulty tiers are completely mixed within the .bin
-        random.shuffle(puzzles)
-        filepath = OUT_DIR / f"{theme}.bin"
-        write_binary(puzzles, filepath)
-        total_saved += len(puzzles)
-        
-    print(f"Successfully generated {len(selected_puzzles)} theme bins. Total puzzles: {total_saved:,}", flush=True)
 
-    print("Zipping up all bin files into puzzles.zip...", flush=True)
-    with zipfile.ZipFile(ZIP_FILE, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk(OUT_DIR):
-            for file in files:
-                if file.endswith('.bin'):
-                    filepath = os.path.join(root, file)
-                    # Flattens the zip so all .bin files are right at the root
-                    zipf.write(filepath, file) 
+    # 1. Main 39 Themes
+    for theme in THEMES:
+        os.makedirs(f'puzzlesbin/{theme}', exist_ok=True)
+        meta_json[theme] = {}
+        
+        for tier in [1, 2, 3]:
+            meta_json[theme][f"t{tier}"] = {"total": 0, "brackets": {}}
+            puzzles = categorized[theme][tier]
+            puzzles.sort(key=lambda x: x[0]) # Sort strictly by rating
+            
+            # Group into brackets
+            brackets = defaultdict(list)
+            for p in puzzles:
+                brackets[ (p[0] // 100) * 100 ].append(p)
                 
-    print(f"Done! {ZIP_FILE} created successfully.", flush=True)
+            final_list = []
+            for b_val in sorted(brackets.keys()):
+                selected = brackets[b_val][:LIMITS[tier]]
+                start_idx = len(final_list)
+                final_list.extend(selected)
+                end_idx = len(final_list) - 1
+                meta_json[theme][f"t{tier}"]["brackets"][str(b_val)] = [start_idx, end_idx]
+                
+            if not final_list:
+                continue
+
+            meta_json[theme][f"t{tier}"]["total"] = len(final_list)
+            total_saved += len(final_list)
+            
+            with open(f'puzzlesbin/{theme}/{tier}.bin', 'wb') as bf:
+                bf.write(struct.pack('<I', len(final_list)))
+                for p in final_list:
+                    bf.write(pack_standard_puzzle(p[0], p[1], p[2]))
+
+    # 2. Unclassified (Fill to ~1.7M)
+    remaining_quota = 1700000 - total_saved
+    meta_json["unclassified"] = {}
+    for tier in [1, 2, 3]:
+        if remaining_quota <= 0: break
+        
+        puzzles = unclassified[tier]
+        puzzles.sort(key=lambda x: x[0])
+        
+        # We take heavily from unclassified if needed, capped by our quota limits
+        tier_quota = min(remaining_quota, len(puzzles))
+        final_list = puzzles[:tier_quota]
+        
+        if final_list:
+            meta_json["unclassified"][f"t{tier}"] = {"total": len(final_list), "brackets": {}}
+            # Simplify brackets for unclassified just to index boundaries
+            cur_bracket = -1
+            start_idx = 0
+            for idx, p in enumerate(final_list):
+                b_val = (p[0] // 100) * 100
+                if b_val != cur_bracket:
+                    if cur_bracket != -1:
+                        meta_json["unclassified"][f"t{tier}"]["brackets"][str(cur_bracket)] = [start_idx, idx-1]
+                    cur_bracket = b_val
+                    start_idx = idx
+            meta_json["unclassified"][f"t{tier}"]["brackets"][str(cur_bracket)] = [start_idx, len(final_list)-1]
+
+            remaining_quota -= len(final_list)
+            
+            with open(f'puzzlesbin/unclassified/{tier}.bin', 'wb') as bf:
+                bf.write(struct.pack('<I', len(final_list)))
+                for p in final_list:
+                    bf.write(pack_standard_puzzle(p[0], p[1], p[2]))
+
+    # 3. Reserve 1200 (Single unified file)
+    reserve_final = []
+    for tier in [1, 2, 3]:
+        puzzles = reserve[tier]
+        puzzles.sort(key=lambda x: x[0])
+        reserve_final.extend(puzzles[:RESERVE_LIMITS[tier]])
+    
+    reserve_final.sort(key=lambda x: x[0])
+    
+    with open('puzzlesbin/reserve/1200.bin', 'wb') as bf:
+        bf.write(struct.pack('<I', len(reserve_final)))
+        for p in reserve_final:
+            bf.write(pack_reserve_puzzle(THEME_MAP[p[3]], p[0], p[1], p[2]))
+
+    with open('puzzlesbin/puzzle_meta.json', 'w') as mf:
+        json.dump(meta_json, mf)
+        
+    print(f"Done! Extracted ~{1700000 - remaining_quota} main puzzles and {len(reserve_final)} reserve puzzles.")
 
 if __name__ == "__main__":
-    main()
-                        
+    process_lichess_database("lichess_db_puzzle.csv.zst")
+                

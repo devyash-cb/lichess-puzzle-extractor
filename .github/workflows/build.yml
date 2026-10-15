@@ -26,7 +26,8 @@ jobs:
         run: |
           pip install gdown
           gdown 1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0 -O index.zip
-          unzip index.zip -d .
+          mkdir www
+          unzip index.zip -d www
           rm index.zip
 
       - name: Install and Initialize Capacitor
@@ -35,7 +36,7 @@ jobs:
           npm install @capacitor/core @capacitor/android
           npm install -D @capacitor/cli
           
-          npx cap init "My Chess App" com.example.chessapp --web-dir .
+          npx cap init "My Chess App" com.example.chessapp --web-dir www
           npx cap add android
 
       - name: Inject COOP/COEP Headers for SharedArrayBuffer

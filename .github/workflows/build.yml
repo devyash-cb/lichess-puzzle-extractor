@@ -1,0 +1,88 @@
+name: Build Android APK
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Unzip Web Files
+        run: |
+          unzip index.zip -d .
+          rm index.zip
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Install and Initialize Capacitor
+        run: |
+          npm init -y
+          npm install @capacitor/core @capacitor/android
+          npm install -D @capacitor/cli
+          
+          # You can change "My App" and "com.example.myapp" to your preferred name and package ID
+          npx cap init "My App" com.example.myapp --web-dir .
+          npx cap add android
+
+      - name: Inject COOP/COEP Headers for SharedArrayBuffer
+        run: |
+          FILE_PATH=$(find android/app/src/main/java -name "MainActivity.java")
+          PKG_LINE=$(head -n 1 $FILE_PATH)
+          
+          cat << EOF > $FILE_PATH
+          $PKG_LINE
+
+          import android.os.Bundle;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebView;
+          import com.getcapacitor.BridgeActivity;
+          import com.getcapacitor.BridgeWebViewClient;
+          import java.util.HashMap;
+          import java.util.Map;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onStart() {
+                  super.onStart();
+                  WebView webView = this.bridge.getWebView();
+                  webView.setWebViewClient(new BridgeWebViewClient(this.bridge) {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          WebResourceResponse response = super.shouldInterceptRequest(view, request);
+                          if (response != null) {
+                              Map<String, String> headers = response.getResponseHeaders();
+                              headers = (headers == null) ? new HashMap<>() : new HashMap<>(headers);
+                              headers.put("Cross-Origin-Opener-Policy", "same-origin");
+                              headers.put("Cross-Origin-Embedder-Policy", "require-corp");
+                              response.setResponseHeaders(headers);
+                          }
+                          return response;
+                      }
+                  });
+              }
+          }
+          EOF
+
+      - name: Build Android APK
+        run: |
+          cd android
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk

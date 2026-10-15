@@ -79,6 +79,20 @@ jobs:
           }
           EOF
 
+      - name: Fix Kotlin Duplicate Class Error
+        run: |
+          cat << 'EOF' >> android/build.gradle
+          
+          allprojects {
+              configurations.all {
+                  resolutionStrategy {
+                      exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+                      exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+                  }
+              }
+          }
+          EOF
+
       - name: Build Android APK
         run: |
           cd android

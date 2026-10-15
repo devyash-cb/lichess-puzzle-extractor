@@ -25,7 +25,7 @@ jobs:
       - name: Download and Unzip Web Files from Drive
         run: |
           pip install gdown
-          gdown --id 1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0 -O index.zip
+          gdown 1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0 -O index.zip
           unzip index.zip -d .
           rm index.zip
 

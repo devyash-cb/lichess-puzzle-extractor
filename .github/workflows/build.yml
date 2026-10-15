@@ -2,6 +2,8 @@ name: Build Android APK
 on:
   push:
     branches: [ main ]
+  # Added 'workflow_dispatch' so you can manually trigger builds from the Actions tab without pushing code
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -9,11 +11,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
-
-      - name: Unzip Web Files
-        run: |
-          unzip index.zip -d .
-          rm index.zip
 
       - name: Setup Node
         uses: actions/setup-node@v3
@@ -26,14 +23,21 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
+      - name: Download and Unzip Web Files from Drive
+        run: |
+          pip install gdown
+          # Downloading using the specific file ID from your link
+          gdown --id 1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0 -O index.zip
+          unzip index.zip -d .
+          rm index.zip
+
       - name: Install and Initialize Capacitor
         run: |
           npm init -y
           npm install @capacitor/core @capacitor/android
           npm install -D @capacitor/cli
           
-          # You can change "My App" and "com.example.myapp" to your preferred name and package ID
-          npx cap init "My App" com.example.myapp --web-dir .
+          npx cap init "My Chess App" com.example.chessapp --web-dir .
           npx cap add android
 
       - name: Inject COOP/COEP Headers for SharedArrayBuffer
@@ -86,3 +90,4 @@ jobs:
         with:
           name: app-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          

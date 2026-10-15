@@ -2,7 +2,6 @@ name: Build Android APK
 on:
   push:
     branches: [ main ]
-  # Added 'workflow_dispatch' so you can manually trigger builds from the Actions tab without pushing code
   workflow_dispatch: 
 
 jobs:
@@ -10,15 +9,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Setup Java
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
@@ -26,7 +25,6 @@ jobs:
       - name: Download and Unzip Web Files from Drive
         run: |
           pip install gdown
-          # Downloading using the specific file ID from your link
           gdown --id 1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0 -O index.zip
           unzip index.zip -d .
           rm index.zip
@@ -86,7 +84,7 @@ jobs:
           ./gradlew assembleDebug
 
       - name: Upload APK
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: app-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk

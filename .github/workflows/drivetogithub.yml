@@ -14,19 +14,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download Zip from Google Drive
+      - name: Download Zip bypassing Virus Scan Warning
         run: |
-          # Using curl directly instead of gdown to bypass bot-blocking
-          curl -L "https://drive.google.com/uc?export=download&id=1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0" -o downloaded_archive.zip
+          FILE_ID="1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0"
+          
+          # 1. Fetch the virus warning page and save session cookies
+          curl -s -c cookies.txt "https://drive.google.com/uc?export=download&id=${FILE_ID}" > page.html
+          
+          # 2. Extract the 'confirm' token (e.g., confirm=t) from the page
+          CONFIRM_TOKEN=$(grep -a -o 'confirm=[a-zA-Z0-9_-]*' page.html | cut -d= -f2 | head -n 1)
+          
+          # 3. Use the token and cookies to download the actual zip file
+          if [ -n "$CONFIRM_TOKEN" ]; then
+            echo "Virus scan page detected. Bypassing with token: $CONFIRM_TOKEN"
+            curl -L -b cookies.txt "https://drive.google.com/uc?export=download&confirm=${CONFIRM_TOKEN}&id=${FILE_ID}" -o downloaded_archive.zip
+          else
+            echo "No warning page. File downloaded directly."
+            mv page.html downloaded_archive.zip
+          fi
+          
+          # Cleanup temp files
+          rm -f cookies.txt page.html
 
       - name: Create index folder and extract
         run: |
           mkdir -p index
           
-          # Unzip the contents directly into the index folder
+          # Extract and overwrite without prompting
           unzip -o downloaded_archive.zip -d index
           
-          # Remove the downloaded zip file
+          # Remove zip so it doesn't get committed
           rm downloaded_archive.zip
 
       - name: Commit and push changes

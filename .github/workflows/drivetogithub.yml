@@ -14,36 +14,46 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download Zip bypassing Virus Scan Warning
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Download Zip securely via Python
         run: |
-          FILE_ID="1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0"
+          cat << 'EOF' > download.py
+          import requests
           
-          # 1. Fetch the virus warning page and save session cookies
-          curl -s -c cookies.txt "https://drive.google.com/uc?export=download&id=${FILE_ID}" > page.html
+          FILE_ID = '1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0'
+          URL = 'https://drive.google.com/uc?export=download'
           
-          # 2. Extract the 'confirm' token (e.g., confirm=t) from the page
-          CONFIRM_TOKEN=$(grep -a -o 'confirm=[a-zA-Z0-9_-]*' page.html | cut -d= -f2 | head -n 1)
+          print("Connecting to Google Drive...")
+          session = requests.Session()
+          response = session.get(URL, params={'id': FILE_ID}, stream=True)
           
-          # 3. Use the token and cookies to download the actual zip file
-          if [ -n "$CONFIRM_TOKEN" ]; then
-            echo "Virus scan page detected. Bypassing with token: $CONFIRM_TOKEN"
-            curl -L -b cookies.txt "https://drive.google.com/uc?export=download&confirm=${CONFIRM_TOKEN}&id=${FILE_ID}" -o downloaded_archive.zip
-          else
-            echo "No warning page. File downloaded directly."
-            mv page.html downloaded_archive.zip
-          fi
+          for key, value in session.cookies.items():
+              if key.startswith('download_warning'):
+                  print(f"Warning intercepted. Bypassing with token: {value}")
+                  response = session.get(URL, params={'id': FILE_ID, 'confirm': value}, stream=True)
+                  break
+                  
+          with open('downloaded_archive.zip', 'wb') as f:
+              for chunk in response.iter_content(32768):
+                  if chunk: f.write(chunk)
+                  
+          print("Download successful!")
+          EOF
           
-          # Cleanup temp files
-          rm -f cookies.txt page.html
+          python download.py
+          rm download.py
 
       - name: Create index folder and extract
         run: |
           mkdir -p index
-          
-          # Extract and overwrite without prompting
           unzip -o downloaded_archive.zip -d index
-          
-          # Remove zip so it doesn't get committed
           rm downloaded_archive.zip
 
       - name: Commit and push changes

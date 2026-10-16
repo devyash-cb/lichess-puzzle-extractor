@@ -1,10 +1,10 @@
 name: Import Drive Zip to GitHub
 
 on:
-  workflow_dispatch: # Allows you to manually run this workflow from the GitHub Actions tab
+  workflow_dispatch: 
 
 permissions:
-  contents: write # Required for the workflow to commit and push the extracted files
+  contents: write 
 
 jobs:
   import-and-unzip:
@@ -14,28 +14,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python (Required for gdown)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Install gdown
-        run: pip install gdown
-
       - name: Download Zip from Google Drive
         run: |
-          # The file ID extracted from your URL: 1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0
-          gdown 1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0 -O downloaded_archive.zip
+          # Using curl directly instead of gdown to bypass bot-blocking
+          curl -L "https://drive.google.com/uc?export=download&id=1wVfsM3JIUw8NEN4OczAC7v3cV48iz7B0" -o downloaded_archive.zip
 
       - name: Create index folder and extract
         run: |
-          # Create the directory in the root
           mkdir -p index
           
           # Unzip the contents directly into the index folder
           unzip -o downloaded_archive.zip -d index
           
-          # Remove the downloaded zip file so it doesn't get committed
+          # Remove the downloaded zip file
           rm downloaded_archive.zip
 
       - name: Commit and push changes
@@ -43,3 +34,4 @@ jobs:
         with:
           commit_message: "Automated: Extracted Google Drive zip contents into index folder"
           commit_options: '--no-verify'
+          

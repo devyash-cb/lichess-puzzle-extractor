@@ -16,7 +16,7 @@ from pathlib import Path
 API_URL = "https://chess-api.com/v1"
 
 DEPTH = 18
-VARIANTS = 5
+VARIANTS = 2
 MAX_THINKING_TIME = 100
 
 # Delay between completed API requests.

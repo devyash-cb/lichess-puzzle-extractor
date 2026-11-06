@@ -256,6 +256,9 @@ for index, position in enumerate(positions):
     try:
         response = api_request(position["fen"])
 
+        print("FEN:", position["fen"])
+        print("PLY:", position["ply"])
+
         analysis_board = chess.Board(position["fen"])
 
         position["analysis"] = extract_analysis(
